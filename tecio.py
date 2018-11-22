@@ -1,9 +1,21 @@
 import ctypes
 import numpy as np
 import sys
+from pathlib import Path
+import os
 def get_dll():
     if sys.platform.startswith('win'):
-        pass
+        p = Path(os.environ['HOMEDRIVE']) / os.environ['HOMEPATH'] / '.yxspkg'/'pytecio'
+        if not p.is_dir():
+            os.makedirs(p)
+        dll_path = p / 'tecio.dll'
+        if not dll_path.is_file():
+            from urllib import request
+            url = 'https://raw.githubusercontent.com/blacksong/pytecio/master/2017r3_tecio.dll'
+            print('Downloading dll from github:',url)
+            request.urlretrieve(url,dll_path)
+        return ctypes.cdll.LoadLibrary(str(dll_path))
+GLOBAL_DLL = get_dll()        
 class zone_data(dict):
     def __init__(self,parent,zone_n):
         super().__init__()
@@ -45,9 +57,9 @@ FieldDataType_Byte = -100
 
 class read_tecio(dict):
 
-    def __init__(self,filename,dll = './tecio.dll'):
+    def __init__(self,filename):
         super().__init__()
-        self.dll = ctypes.cdll.LoadLibrary(dll)
+        self.dll = GLOBAL_DLL
         self.filename = filename
         self.filehandle = self._get_filehandle()
         self.title = self._tecDataSetGetTitle()
@@ -327,11 +339,11 @@ class read_tecio(dict):
 class write_tecio:
     fileFormat = 0 #.szplt
 
-    def __init__(self,filename,dataset=None,dll = './tecio.dll',verbose = True):
+    def __init__(self,filename,dataset=None ,verbose = True):
         self.filename = filename
         self.verbose = verbose
         self.dataset = dataset
-        self.dll = ctypes.cdll.LoadLibrary(dll)
+        self.dll = GLOBAL_DLL
         self.filehandle = self._get_filehandle()
         for i,zone_name in enumerate(dataset.nameZones):
             info = dataset.zone_info[i]
