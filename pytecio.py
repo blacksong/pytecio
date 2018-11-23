@@ -15,6 +15,17 @@ def get_dll():
             print('Downloading dll from github:',url)
             request.urlretrieve(url,dll_path)
         return ctypes.cdll.LoadLibrary(str(dll_path))
+    elif sys.platform.startswith('linux'):
+        p = Path(os.environ['HOME']) / '.yxspkg'/'pytecio'
+        if not p.is_dir():
+            os.makedirs(p)
+        dll_path = p / 'tecio.so'
+        if not dll_path.is_file():
+            from urllib import request
+            url = 'https://raw.githubusercontent.com/blacksong/pytecio/master/2017r3_tecio.so'
+            print('Downloading dll from github:',url)
+            request.urlretrieve(url,dll_path)
+        return ctypes.cdll.LoadLibrary(str(dll_path))
 GLOBAL_DLL = get_dll()        
 class zone_data(dict):
     def __init__(self,parent,zone_n):
@@ -335,6 +346,10 @@ class read_tecio(dict):
 
     def close(self):
         self.dll.tecFileReaderClose(ctypes.pointer(self.filehandle))
+    
+    def write(self,filename,verbose = True):
+        k = write_tecio(filename,self,verbose=verbose)
+        k.close()
 
 class write_tecio:
     fileFormat = 0 #.szplt
@@ -455,7 +470,12 @@ class write_tecio:
         fun(self.filehandle, *d, data)
     def close(self):
         self.dll.tecFileWriterClose(ctypes.pointer(self.filehandle))
-
+def read(filename):
+    return read_tecio(filename)
+def write(filename,dataset,verbose = True):
+    t = write_tecio(filename,dataset, verbose=verbose)
+    t.close()
+    
 if __name__=='__main__':
     test = read_tecio('0605_ddes_profile_yxs_terminal_sample.szplt')
     test[0]['new'] = test[0][0]
