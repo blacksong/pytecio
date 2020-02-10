@@ -22,7 +22,7 @@ def get_dll():
         dll_path = p / 'tecio.so'
         if not dll_path.is_file():
             from urllib import request
-            url = 'https://raw.githubusercontent.com/blacksong/pytecio/master/2017r3_tecio.so'
+            url = 'https://raw.githubusercontent.com/blacksong/pytecio/master/2017r2_tecio.so'
             print('Downloading dll from github:',url)
             request.urlretrieve(url,dll_path)
         return ctypes.cdll.LoadLibrary(str(dll_path))
