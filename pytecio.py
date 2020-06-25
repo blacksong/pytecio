@@ -1,31 +1,31 @@
+# 本模块用来读写tecplot的szplt格式文件
+# 在写szplt文件时dataset要求的数据格式可以是SzpltData类，也可以是list，tuple，dict，
+# 统一调用read和write函数
 import ctypes
 import numpy as np
 import sys
 from pathlib import Path
 import os
+__version__='0.2.1'
 def get_dll():
+    p = Path.home() / '.yxspkg'/'pytecio'
+    if not p.is_dir():
+        os.makedirs(p)
+
     if sys.platform.startswith('win'):
-        p = Path(os.environ['HOMEDRIVE']) / os.environ['HOMEPATH'] / '.yxspkg'/'pytecio'
-        if not p.is_dir():
-            os.makedirs(p)
         dll_path = p / 'tecio.dll'
-        if not dll_path.is_file():
-            from urllib import request
-            url = 'https://raw.githubusercontent.com/blacksong/pytecio/master/2017r3_tecio.dll'
-            print('Downloading dll from github:',url)
-            request.urlretrieve(url,dll_path)
-        return ctypes.cdll.LoadLibrary(str(dll_path))
+        url = 'https://raw.githubusercontent.com/blacksong/pytecio/master/2017r3_tecio.dll'
+
     elif sys.platform.startswith('linux'):
-        p = Path(os.environ['HOME']) / '.yxspkg'/'pytecio'
-        if not p.is_dir():
-            os.makedirs(p)
         dll_path = p / 'tecio.so'
-        if not dll_path.is_file():
-            from urllib import request
-            url = 'https://raw.githubusercontent.com/blacksong/pytecio/master/2017r3_tecio.so'
-            print('Downloading dll from github:',url)
-            request.urlretrieve(url,dll_path)
-        return ctypes.cdll.LoadLibrary(str(dll_path))
+        url = 'https://raw.githubusercontent.com/blacksong/pytecio/master/2017r2_tecio.so'
+
+
+    if not dll_path.is_file():
+        from urllib import request
+        print('Downloading dll from github:',url)
+        request.urlretrieve(url,dll_path)
+    return ctypes.cdll.LoadLibrary(str(dll_path))
 GLOBAL_DLL = get_dll()        
 class zone_data(dict):
     def __init__(self,parent,zone_n):
@@ -62,16 +62,22 @@ class zone_data(dict):
 FieldDataType_Double = 2
 FieldDataType_Float  = 1
 
-FieldDataType_Int32 = -100 # -100:not defined
+FieldDataType_Int32 = 3 # -100:not defined
 FieldDataType_Int16 = -100 
 FieldDataType_Byte = -100
 
-class read_tecio(dict):
+Structed_Grid = 0
+class SzpltData(dict):
 
-    def __init__(self,filename):
+    def __init__(self,filename,isread=False):
         super().__init__()
+        if not isinstance(filename,str):
+            self.GenerateDataFromOtherFormat(filename)
+            return
         self.dll = GLOBAL_DLL
+        
         self.filename = filename
+        self.added_new_zone = False
         self.filehandle = self._get_filehandle()
         self.title = self._tecDataSetGetTitle()
         self.numVars = self._tecDataSetGetNumVars()
@@ -98,18 +104,26 @@ class read_tecio(dict):
             d['shareConnectivityFromZone'] = self._tecZoneConnectivityGetSharedZone(i+1)
             d['faceNeighborMode'] = self._tecZoneFaceNbrGetMode(i+1)
             d['numFaceConnections'] = self._tecZoneFaceNbrGetNumConnections(i+1)
+            if d['numFaceConnections'] > 0:
+                d['faceConnections'] = self._tecZoneFaceNbrGetConnections(i+1)
             d['parentZone'] = self._tecZoneGetParentZone(i+1)
             d['name'] = zone_name
+            d['aux'] = self._retrieve_aux_data(i+1)
             return d
         self.zone_info = [cal_zone(i,zone_name) for i,zone_name in enumerate(self.nameZones)]
         self.update({name:zone_data(self,i+1) for i,name in enumerate(self.nameZones)})
         # self._retrieve_zone_node_map(1)
-        self._retrieve_aux_data(1)
+        # self._retrieve_aux_data(1)
+        if isread:
+            [zone[var_name] for zone in self.values() for var_name in self.nameVars]
 
     def __getitem__(self,key):
         if isinstance(key, int):
             key = self.nameZones[key]
         return super().__getitem__(key)
+    def __setitem__(self,key,value):
+        self.added_new_zone = True 
+        return super().__setitem__(key,value)
     def _read_zone_var(self,zone_n,var_n):
         
         info = self.zone_info[zone_n - 1]
@@ -119,13 +133,32 @@ class read_tecio(dict):
             fieldDataType = info['varTypes'][var_n-1]
             if fieldDataType is FieldDataType_Float:
                 d = self._get_data_all_type(zone_n, var_n, numValues, ctypes.c_float, self.dll.tecZoneVarGetFloatValues)
-                np_array = np.array(d)
+                # np_array = np.array(d)
             elif fieldDataType is FieldDataType_Double:
                 d = self._get_data_all_type(zone_n, var_n, numValues, ctypes.c_double, self.dll.tecZoneVarGetDoubleValues)
-                np_array = np.array(d)
+                # np_array = np.array(d)
+            elif fieldDataType is FieldDataType_Int32:
+                d = self._get_data_all_type(zone_n, var_n, numValues, ctypes.c_int, self.dll.tecZoneVarGetInt32Values)
+                # np_array = np.array(d)
+            elif fieldDataType is FieldDataType_Int16:
+                d = self._get_data_all_type(zone_n, var_n, numValues, ctypes.c_int, self.dll.tecZoneVarGetInt16Values)
+                # np_array = np.array(d)
+            elif fieldDataType is FieldDataType_Byte:
+                d = self._get_data_all_type(zone_n, var_n, numValues, ctypes.c_int, self.dll.tecZoneVarGetByteValues)
+                # np_array = np.array(d)
             else:
                 raise Exception('FieldDataType Error:not defined data type')
-            return np_array
+            d = np.array(d)
+            if info['zoneType'] is Structed_Grid:
+                #structed grid
+                Imax,Jmax,Kmax = info['IJK']
+                if d.size != Imax*Jmax*Kmax:
+                    Imax =max(Imax - 1,1)
+                    Jmax =max(Jmax - 1,1)
+                    Kmax =max(Kmax - 1,1)
+
+                d = d.reshape((Kmax,Jmax,Imax)).transpose((2,1,0))
+            return d
         else:
             return np.array([])
     def _get_data_all_type(self, zone_n, var_n, numValues, c_type, fun):
@@ -219,7 +252,7 @@ class read_tecio(dict):
         info['varTypes'].append(info['varTypes'][-1])
         info['shareVarFromZone'].append(0)
         I,J,K = info['IJK']
-        if info['zoneType'] is 0:#IJK type
+        if info['zoneType'] is Structed_Grid:#structed IJK type
             if value.size == I*J*K:
                 valueLocation = 1
             else:
@@ -279,10 +312,17 @@ class read_tecio(dict):
 
     def _tecZoneFaceNbrGetNumConnections(self,zone_n):
         numFaceConnections = self._return_1_int(zone_n,self.dll.tecZoneFaceNbrGetNumConnections)
-        if numFaceConnections>0:
-            raise Exception('numFaceConnections>0: maybe something wrong with this program')
         return numFaceConnections
-
+    def _tecZoneFaceNbrGetConnections(self,zone_n):
+        numFaceValues = self._return_1_int(zone_n,self.dll.tecZoneFaceNbrGetNumValues)
+        are64Bit = self._return_1_int(zone_n,self.dll.tecZoneFaceNbrsAre64Bit)
+        if are64Bit:
+            faceConnections = self._return_n_array(self.dll.tecZoneFaceNbrGetConnections64,
+                                                    ctypes.c_long,numFaceValues,zone_n)
+        else:
+            faceConnections = self._return_n_array(self.dll.tecZoneFaceNbrGetConnections,
+                                                       ctypes.c_int,numFaceValues,zone_n)
+        return faceConnections
     def _tecZoneGetSolutionTime(self,zone_n):
         d = ctypes.c_double(0.0)
         p = ctypes.pointer(d)
@@ -312,7 +352,7 @@ class read_tecio(dict):
         return k
     def _retrieve_zone_node_map(self,zone_n):
         info = self.zone_info[zone_n-1]
-        if info['zoneType'] is not 0 and info['shareConnectivityFromZone'] is 0:
+        if info['zoneType'] is not Structed_Grid and info['shareConnectivityFromZone'] is 0:
             jMax = info['IJK'][1]
             numValues = self._tecZoneNodeMapGetNumValues(zone_n,jMax)
 
@@ -321,14 +361,26 @@ class read_tecio(dict):
                 #is64bit True
                 nodeMap = self._return_n_array(self.dll.tecZoneNodeMapGet64, ctypes.c_long, numValues, zone_n,1,jMax)
             else:
-                nodeMap = self._return_n_array(self.dll.tecZoneNodeMapGet, ctypes.c_long, numValues, zone_n,1,jMax)
+                nodeMap = self._return_n_array(self.dll.tecZoneNodeMapGet, ctypes.c_int, numValues, zone_n,1,jMax)
 
         return nodeMap.reshape((jMax,-1))
     def _retrieve_aux_data(self,zone_n):
         numItems = self._tecZoneAuxDataGetNumItems(zone_n)
 
         if numItems!=0:
-            raise Exception('aux data exists, there is an error')
+            aux_data = dict()
+            for whichItem in range(1,numItems+1):
+                name = ctypes.c_char_p()
+                value = ctypes.c_char_p()
+                name_p = ctypes.pointer(name)
+                value_p = ctypes.pointer(value)
+                self.dll.tecZoneAuxDataGetItem(self.filehandle,zone_n,whichItem,name_p,value_p)
+                name = name_p[0].decode()
+                value = value_p[0].decode()
+                aux_data[name]=value
+            return aux_data
+        else:
+            return None
     def _tecZoneAuxDataGetNumItems(self,zone_n):
         return self._return_1_int(zone_n,self.dll.tecZoneAuxDataGetNumItems)
 
@@ -350,27 +402,170 @@ class read_tecio(dict):
     def write(self,filename,verbose = True):
         k = write_tecio(filename,self,verbose=verbose)
         k.close()
+    
+    def judge_valuelocation_passive(self,zone_name,var_name,name0):
+        I,J,K = self[zone_name][name0].shape 
+        value = self[zone_name][var_name]
+        # print(zone_name,var_name,value is None)
+        if value is None:
+            return var_name, 1, 1, 'float32'
+        if self.Unstructed:
+            if value.size == I:
+                valueLocation = 1
+            else:
+                valueLocation = 0
+        else:
+            #Structed_grid
+            if value.size == I*J*K:
+                valueLocation = 1
+            else:
+                valueLocation = 0
+        return var_name, valueLocation, 0, str(value.dtype)
+    def sort_nameVars(self):
+        def fun_key(name):
+            if name.find('Coordinate') != -1:
+                return ord(name[-1])
+            if name.lower() in 'xyz':
+                return 256 + ord(name)
+            return sum([ord(i) for i in name]) + 500
+        self.nameVars.sort(key = fun_key)
+    def judge_unstructed(self,dataset):
+        self.Unstructed = False
+        for i in dataset.values():
+            for j in i.values():
+                shape = j.shape
+                if j.ndim>1:
+                    if shape[1]*shape[2] > 1:
+                        self.Unstructed = False 
+                        return
+                else: 
+                    self.Unstructed = True 
+                    return
+    def GenerateDataFromOtherFormat(self,dataset):
+        #将其他类型的数据转化为SzpltData类型
+        if isinstance(dataset,SzpltData):
+            self = SzpltData
+            return
+        elif isinstance(dataset,list) or isinstance(dataset,tuple):
+            dataset = {str(i+1):v for i,v in enumerate(dataset)}
+
+        aux_data = []
+        for v in dataset.values():
+            for j in v.keys():
+                if not isinstance(v[j],np.ndarray):
+                    aux_data.append(j)
+            break
+        dataset = {i:{j:vd for j,vd in v.items() if j not in aux_data} for i,v in dataset.items()}
+        self.judge_unstructed(dataset)
+        self.update(dataset)
+
+        self.nameZones = list(self.keys())
+        name0 = list(self[self.nameZones[0]].keys())[0]
+        loc_pass = [self.judge_valuelocation_passive(zone,vname,name0) for zone in self.keys() for vname in self[zone].keys()]
+        loc_pass = set(loc_pass)
+        loc_pass_name = set([i[:3] for i in loc_pass])
+        self.nameVars = [i[0] for i in loc_pass_name]
+        assert len(set(self.nameVars)) == len(loc_pass_name)
+        nameVars_ = list(self[self.nameZones[0]].keys())
+        for i in self.nameVars:
+            if i not in nameVars_:
+                nameVars_.append(i)
+        self.nameVars = nameVars_
+        self.sort_nameVars()
+        empty = np.array([])
+        for zone_name_,zone in self.items():
+            I,J,K = zone[name0].shape
+            for var_name,location,passive,dtype in loc_pass:
+                if var_name not in zone:
+                    if passive is 0:
+                        if not self.Unstructed:
+                            if location == 1:
+                                t = np.zeros((I,J,K),dtype=dtype)
+                            else:
+                                t = np.zeros((I-1,J-1,K-1),dtype=dtype)
+                        else:
+                            if location == 1:
+                                t = np.zeros((I,J,K),dtype=dtype)
+                            else:
+                                print(zone_name_,var_name)
+                                raise Exception("Unstructed grid center value")
+                    else:
+                        t = empty
+                    zone[var_name] = t
+        self.title = 'Pytecio data'
+        def cal_zone_info(name_zone,value_location):
+            d = dict()
+            zone_value = self[name_zone]
+            empty = np.array([])
+            shape = self[name_zone][self.nameVars[0]].shape
+            zoneType = Structed_Grid
+            if len(shape) == 1:
+                shape = shape[0],1,1
+                zoneType = 1
+            elif len(shape)==2:
+                shape = 1,shape[0],shape[1]
+            d['varTypes'] = [self.get_varTypes(name_zone,j) for j in self.nameVars]
+            d['passiveVarList'] = [0 if zone_value.get(i,empty).size>0 else 1 for i in self.nameVars]
+            d['shareVarFromZone'] = [0] * len(self.nameVars)
+            # valueLocation: value 1 represent the data is saved on nodes, value 0 means on elements center
+            d['valueLocation'] = value_location
+            d['IJK'] = shape
+            d['zoneType'] = zoneType
+            d['solutionTime'] = .0
+            d['strandID'] = 0
+            d['shareConnectivityFromZone'] = 0
+            d['faceNeighborMode'] = 0
+            d['numFaceConnections'] = 0
+            d['parentZone'] = 0
+            d['name'] = name_zone
+            return d
+        temp_zone = self[self.nameZones[0]]
+        value_location = [sum(temp_zone[key].shape) for key in self.nameVars]
+        max_location = max(value_location)
+        value_location = [0 if i<max_location else 1 for i in value_location]
+        self.zone_info = [cal_zone_info(i,value_location) for i in self.nameZones]
+        self.fileType = 0
+        self.added_new_zone = False
+    def get_varTypes(self,name_zone,name_var):
+        varTypes={'int32':3,'float64':2,'float32':1}
+        d = self[name_zone][name_var]
+        dtype = str(d.dtype)
+        if dtype == 'int64':
+            d = d.astype('int32')
+            self[name_zone][name_var] = d
+            dtype = 'int32'
+        return varTypes[dtype]
 
 class write_tecio:
     fileFormat = 0 #.szplt
 
     def __init__(self,filename,dataset=None ,verbose = True):
+        '''
+        dataset 只要是包含两层字典的数据都可以 like d[key_zone][key_var],如果是非SzpltData类型的数据，目前只支持结构化的数据
+        '''
         self.filename = filename
         self.verbose = verbose
+        if hasattr(dataset,'added_new_zone') and dataset.added_new_zone:
+            dataset = {k:{k2:dataset[k][k2] for k2 in dataset[k].keys()} for k in dataset.keys()}
+        if not isinstance(dataset,SzpltData):
+            dataset = SzpltData(dataset)
         self.dataset = dataset
         self.dll = GLOBAL_DLL
         self.filehandle = self._get_filehandle()
+        empty = np.array([])
         for i,zone_name in enumerate(dataset.nameZones):
             info = dataset.zone_info[i]
             I,J,K = info['IJK']
+            zone_set = dataset[zone_name]
             varTypes = self._list_to_int_array(info['varTypes'])
 
             #因为这里有个bug所以我加了这样一句转化,原因是第一个zone共享了第一个zone 在创建的时候会导致失败，所以在写文件时强制取消shared
             shareVarFromZone = self._list_to_int_array(info['shareVarFromZone'])
             valueLocation = self._list_to_int_array(info['valueLocation'])
+            info['passiveVarList'] = [0 if zone_set.get(i,empty).size>0 else 1 for i in dataset.nameVars]
             passiveVarList = self._list_to_int_array(info['passiveVarList'])
-
-            if info['zoneType'] == 0:
+            
+            if info['zoneType'] == Structed_Grid:
                 outputZone = self._tecZoneCreateIJK(zone_name,I,J,K,varTypes, shareVarFromZone,
                 valueLocation, passiveVarList, info['shareConnectivityFromZone'], info['numFaceConnections'], info['faceNeighborMode'])
             else:
@@ -380,13 +575,34 @@ class write_tecio:
             self._tecZoneSetUnsteadyOptions(outputZone, info['solutionTime'], info['strandID'])
             if info['parentZone'] != 0:
                 self._tecZoneSetParentZone(outputZone,info['parentZone'])
-            zone_set = dataset[zone_name]
+            if info['numFaceConnections'] > 0:
+                faceConnections = info['faceConnections']
+                if isinstance(faceConnections,list) or isinstance(faceConnections,tuple):
+                    faceConnections = np.array(faceConnections,dtype='int64')
+                    print(faceConnections)
+                if faceConnections.itemsize == 8:
+                    self._write_data_all_type(self.dll.tecZoneFaceNbrWriteConnections64,
+                                              faceConnections.ctypes,outputZone)
+                else:
+                    self._write_data_all_type(self.dll.tecZoneFaceNbrWriteConnections32,
+                                              faceConnections.ctypes,outputZone)
+            if info.get('aux') is not None:
+                for key,value in info['aux'].items():
+                    key_p = ctypes.c_char_p(key.encode())
+                    value_p = ctypes.c_char_p(value.encode())
+                    self.dll.tecZoneAddAuxData(self.filehandle,outputZone,key_p,value_p)
+            
             for j,var_name in enumerate(dataset.nameVars):
 
                 var_n = j+1
-                data=zone_set[var_name]
-
-
+                data=zone_set[var_name].copy(order='C')
+                if info['zoneType'] is Structed_Grid:
+                    if data.ndim == 2:
+                        shape = data.shape
+                        data.shape = 1,shape[0],shape[1]
+                    
+                    if data.size > 0:
+                        data = data.transpose((2,1,0)).copy()
                 ff = [min(i,j) for j in info['shareVarFromZone']]
                 if info['passiveVarList'][var_n - 1] is 0 and ff[var_n -1] is 0:
                     
@@ -395,13 +611,20 @@ class write_tecio:
                         self._write_data_all_type(self.dll.tecZoneVarWriteFloatValues, data.ctypes, outputZone, var_n, 0, data.size)
                     elif fieldDataType is FieldDataType_Double:
                         self._write_data_all_type(self.dll.tecZoneVarWriteDoubleValues, data.ctypes, outputZone, var_n, 0, data.size)
-
+                    elif fieldDataType is FieldDataType_Int32:
+                        self._write_data_all_type(self.dll.tecZoneVarWriteInt32Values, data.ctypes, outputZone, var_n, 0, data.size)
+                    elif fieldDataType is FieldDataType_Int16:
+                        self._write_data_all_type(self.dll.tecZoneVarWriteInt16Values, data.ctypes, outputZone, var_n, 0, data.size)
+                    elif fieldDataType is FieldDataType_Byte:
+                        self._write_data_all_type(self.dll.tecZoneVarWriteByteValues, data.ctypes, outputZone, var_n, 0, data.size)
                     else:
+                        print(fieldDataType,'iiiiiiiiiiiii')
                         raise Exception('FieldDataType Error:not defined data type')
+                
             self._write_zone_node_map(outputZone, info, zone_set)
     def _write_zone_node_map(self,zone_n,info, zone_set):
         # info = self.dataset.zone_info[self.dataset.nameZones[zone_n-1]]
-        if info['zoneType'] is not 0 and info['shareConnectivityFromZone'] is 0:
+        if info['zoneType'] is not Structed_Grid and info['shareConnectivityFromZone'] is 0:
             Elements = zone_set.Elements
             numValues = Elements.size
             if Elements.itemsize is 8:
@@ -422,7 +645,7 @@ class write_tecio:
         filehandle = ctypes.pointer(p1)
         name = ctypes.c_char_p(self.filename.encode())
         fileType = self.dataset.fileType
-        name_str = ','.join(self.dataset.nameVars)
+        name_str = ','.join([str(i) for i in self.dataset.nameVars])
         # name_str
         var_list_str = ctypes.c_char_p(name_str.encode())
         title_str = ctypes.c_char_p(self.dataset.title.encode())
@@ -466,19 +689,20 @@ class write_tecio:
         self.dll.tecZoneSetParentZone(self.filehandle,zone_n,zone_parent)
 
     def _write_data_all_type(self,fun,data, *d):
-
         fun(self.filehandle, *d, data)
     def close(self):
         self.dll.tecFileWriterClose(ctypes.pointer(self.filehandle))
-def read(filename):
-    return read_tecio(filename)
+def read(filename,isread=False):
+    return SzpltData(filename,isread)
 def write(filename,dataset,verbose = True):
     t = write_tecio(filename,dataset, verbose=verbose)
     t.close()
-    
+def cal_zone(number,g,q):
+    g = g[number]
+    q = q[number]
+    k = {i:g[i] for i in 'XYZ'}
+    y = {'VAR{}'.format(key):val for key,val in q.items() if isinstance(key,int)}
+    k.update(y)
+    return k   
 if __name__=='__main__':
-    test = read_tecio('0605_ddes_profile_yxs_terminal_sample.szplt')
-    test[0]['new'] = test[0][0]
-    print(test[0].keys())
-    t    = write_tecio('0605_ddes_profile_yxs_terminal_sample2.szplt',test,verbose = True)
-    t.close()
+    pass

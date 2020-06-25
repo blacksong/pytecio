@@ -1,7 +1,7 @@
 from setuptools import setup 
 
 setup(name='pytecio',   
-      version='0.1.3',    
+      version='1.0',    
       description='tecio wrapper for python',    
       author='blacksong',    
       install_requires=['numpy'],
